@@ -37,10 +37,75 @@ $assigned_tasks = $task_stmt->fetchAll(PDO::FETCH_ASSOC);
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'])) {
     $task_id = $_POST['task_id'];
     $new_status = $_POST['new_status'];
-    $update_stmt = $pdo->prepare("UPDATE tasks SET status = ? WHERE id = ? AND labor_id = ?");
-    $update_stmt->execute([$new_status, $task_id, $labor_id]);
-    header("Location: " . $_SERVER['PHP_SELF']);
-    exit();
+    
+    try {
+        $pdo->beginTransaction();
+        
+        // Update task status
+        $update_stmt = $pdo->prepare("UPDATE tasks SET status = ? WHERE id = ? AND labor_id = ?");
+        $update_stmt->execute([$new_status, $task_id, $labor_id]);
+
+        // If task is marked as completed, process the reward
+        if ($new_status === 'completed') {
+            // Get waste details
+            $waste_sql = "SELECT w.id, w.user_id, w.waste_type, w.ai_analysis 
+                         FROM waste w 
+                         JOIN tasks t ON w.id = t.waste_id 
+                         WHERE t.id = ?";
+            $waste_stmt = $pdo->prepare($waste_sql);
+            $waste_stmt->execute([$task_id]);
+            $waste = $waste_stmt->fetch(PDO::FETCH_ASSOC);
+
+            // Calculate reward points
+            $volume = 0;
+            if (preg_match('/Estimated Volume: ([\d.]+) m³/', $waste['ai_analysis'], $matches)) {
+                $volume = floatval($matches[1]);
+            }
+
+            // Calculate reward based on waste type and volume
+            $points_per_m3 = [
+                'Plastic' => 20,
+                'Paper' => 15,
+                'Glass' => 25,
+                'Metal' => 30,
+                'E-waste' => 40,
+                'Organic' => 10,
+                'Hazardous' => 50,
+                'Textile' => 15,
+                'Construction' => 20,
+                'Other' => 15,
+                'Paper, Cardboard' => 15
+            ];
+
+            $base_points = isset($points_per_m3[$waste['waste_type']]) ? $points_per_m3[$waste['waste_type']] : 15;
+            $reward_points = min(round($base_points * $volume), 100);
+
+            // Update waste status and reward points
+            $update_waste_sql = "UPDATE waste SET status = 'approved', reward_points = ? WHERE id = ?";
+            $update_waste_stmt = $pdo->prepare($update_waste_sql);
+            $update_waste_stmt->execute([$reward_points, $waste['id']]);
+
+            // Add notification for the user
+            $notify_sql = "INSERT INTO notifications (user_id, notification_type, waste_type, message, is_read) 
+                          VALUES (?, 'reward_assigned', ?, ?, 0)";
+            $notify_stmt = $pdo->prepare($notify_sql);
+            $notify_stmt->execute([
+                $waste['user_id'],
+                $waste['waste_type'],
+                "You received {$reward_points} points for your {$waste['waste_type']} waste collection task completion."
+            ]);
+        }
+
+        $pdo->commit();
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit();
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        error_log("Error in labour.php: " . $e->getMessage());
+        // Handle error appropriately
+        header("Location: " . $_SERVER['PHP_SELF'] . "?error=1");
+        exit();
+    }
 }
 ?>
 
@@ -127,41 +192,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'])) {
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
-        // Request permission for desktop notifications
-        if (Notification.permission !== "granted") {
-            Notification.requestPermission();
-        }
-
-        // Function to handle new notifications
-        function handleNewNotification(message, created_at) {
-            // Show desktop notification
-            if (Notification.permission === "granted") {
-                new Notification("New Task Assigned", { body: message });
+        // Request notification permission when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            if (Notification.permission !== 'granted') {
+                Notification.requestPermission();
             }
-            // Reload the page to update the task list
-            location.reload();
+        });
+
+        function handleNewNotification(message) {
+            if (Notification.permission === "granted") {
+                const notification = new Notification("WasteWise Task", {
+                    body: message,
+                    icon: '/path/to/your/logo.png' // Add your logo path here
+                });
+                
+                // Close notification after 5 seconds
+                setTimeout(() => {
+                    notification.close();
+                }, 5000);
+                
+                // Reload the page to update the task list
+                location.reload();
+            }
         }
 
         let lastId = <?php echo empty($notifications) ? 0 : $notifications[0]['id']; ?>;
 
         function checkNotifications() {
-            $.ajax({
-                url: 'sse_notifications.php',
-                method: 'GET',
-                data: { last_id: lastId, user_id: <?php echo $labor_id; ?> },
-                dataType: 'json',
-                success: function(data) {
-                    if (data.notifications && data.notifications.length > 0) {
-                        data.notifications.forEach(function(notification) {
-                            handleNewNotification(notification.message, notification.created_at);
-                        });
-                        lastId = data.notifications[data.notifications.length - 1].id;
-                    }
-                },
-                complete: function() {
-                    // Check for new notifications every 5 seconds
-                    setTimeout(checkNotifications, 5000);
+            fetch('sse_notifications.php?' + new URLSearchParams({
+                last_id: lastId,
+                user_id: laborId
+            }))
+            .then(response => response.json())
+            .then(data => {
+                if (data.notifications && data.notifications.length > 0) {
+                    data.notifications.forEach(function(notification) {
+                        handleNewNotification(notification.message);
+                    });
+                    lastId = data.notifications[data.notifications.length - 1].id;
                 }
+            })
+            .catch(error => console.error('Error:', error))
+            .finally(() => {
+                setTimeout(checkNotifications, 5000);
             });
         }
 

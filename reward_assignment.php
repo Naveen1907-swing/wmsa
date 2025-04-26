@@ -14,6 +14,32 @@ try {
     die("ERROR: Could not connect. " . $e->getMessage());
 }
 
+// Function to calculate suggested reward points
+function calculateSuggestedReward($waste_type, $volume) {
+    // Base points per cubic meter
+    $points_per_m3 = [
+        'Plastic' => 20,
+        'Paper' => 15,
+        'Glass' => 25,
+        'Metal' => 30,
+        'E-waste' => 40,
+        'Organic' => 10,
+        'Hazardous' => 50,
+        'Textile' => 15,
+        'Construction' => 20,
+        'Other' => 15
+    ];
+
+    // Get base points for waste type
+    $base_points = isset($points_per_m3[$waste_type]) ? $points_per_m3[$waste_type] : 15;
+    
+    // Calculate points based on volume (rounded to nearest whole number)
+    $suggested_points = round($base_points * $volume);
+    
+    // Cap maximum points at 100
+    return min($suggested_points, 100);
+}
+
 // Handle reward assignment
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_reward'])) {
     $waste_id = $_POST['waste_id'];
@@ -23,12 +49,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_reward'])) {
     $stmt->execute([':reward_points' => $reward_points, ':waste_id' => $waste_id]);
 }
 
-// Fetch pending waste data
+// Fetch pending waste data with AI analysis
 try {
-    $sql = "SELECT w.*, u.username
+    $sql = "SELECT w.*, u.username 
             FROM waste w 
             JOIN users u ON w.user_id = u.id 
-            WHERE w.status IS NULL OR w.status = 'pending'
+            WHERE (w.status IS NULL OR w.status = 'pending')
             ORDER BY w.created_at DESC";
     $stmt = $pdo->query($sql);
     $pending_waste = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -80,23 +106,45 @@ try {
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Waste Type</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Image</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Analysis</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
                     </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
-                    <?php foreach ($pending_waste as $waste): ?>
+                    <?php foreach ($pending_waste as $waste): 
+                        // Parse AI analysis to get volume
+                        $volume = 0;
+                        if (!empty($waste['ai_analysis'])) {
+                            if (preg_match('/Estimated Volume: ([\d.]+) m³/', $waste['ai_analysis'], $matches)) {
+                                $volume = floatval($matches[1]);
+                            }
+                        }
+                        
+                        // Calculate suggested reward
+                        $suggested_reward = calculateSuggestedReward($waste['waste_type'], $volume);
+                    ?>
                     <tr class="hover:bg-gray-50 transition duration-150">
                         <td class="px-6 py-4 whitespace-nowrap"><?php echo htmlspecialchars($waste['username']); ?></td>
                         <td class="px-6 py-4 whitespace-nowrap"><?php echo htmlspecialchars($waste['waste_type']); ?></td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <img src="<?php echo htmlspecialchars($waste['image_path']); ?>" alt="Waste Image" class="w-20 h-20 object-cover rounded shadow">
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap"><?php echo htmlspecialchars($waste['created_at']); ?></td>
+                        <td class="px-6 py-4">
+                            <div class="text-sm text-gray-900">
+                                <?php echo nl2br(htmlspecialchars($waste['ai_analysis'])); ?>
+                                <div class="mt-2 font-semibold text-green-600">
+                                    Suggested Reward: <?php echo $suggested_reward; ?> points
+                                </div>
+                            </div>
+                        </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <form method="POST" class="flex items-center">
                                 <input type="hidden" name="waste_id" value="<?php echo $waste['id']; ?>">
-                                <input type="number" name="reward_points" min="0" max="100" required class="mr-2 w-20 px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Points">
+                                <input type="number" name="reward_points" 
+                                       value="<?php echo $suggested_reward; ?>"
+                                       min="0" max="100" required 
+                                       class="mr-2 w-20 px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-green-500" 
+                                       placeholder="Points">
                                 <button type="submit" name="assign_reward" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded transition duration-300">
                                     Approve & Reward
                                 </button>

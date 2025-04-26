@@ -37,8 +37,8 @@ $message = '';
 
 // Define popular cities and waste types
 $popular_cities = [
-    'Mumbai', 'Delhi', 'Bangalore', 'Hyderabad', 'Chennai', 
-    'Kolkata', 'Pune', 'Ahmedabad', 'Jaipur', 'Surat'
+    'Block 1', 'Block 2', 'Block 3', 'Block 4', 'Block 5', 
+    'Block 6', 'Block 7', 'Block 8', 'Block 9', 'Block 10'
 ];
 
 $waste_types = [
@@ -49,72 +49,169 @@ $waste_types = [
 // Handle form submission
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     if (!isset($_FILES["waste_image"]) || $_FILES["waste_image"]["error"] != 0) {
-        $message = "Error uploading file. Please try again.";
+        $_SESSION['message'] = "Error uploading file. Please try again.";
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit;
     } elseif (!isset($_POST['location']) || empty($_POST['location'])) {
-        $message = "Location is required.";
+        $_SESSION['message'] = "Location is required.";
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit;
     } elseif ($_POST['location'] === 'other' && (!isset($_POST['other_location']) || empty($_POST['other_location']))) {
-        $message = "Please specify the other location.";
-    } elseif (!isset($_POST['waste_type']) || empty($_POST['waste_type'])) {
-        $message = "Waste type is required.";
+        $_SESSION['message'] = "Please specify the other location.";
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit;
     } else {
         $target_dir = "uploads/";
         if (!file_exists($target_dir)) {
             mkdir($target_dir, 0777, true);
         }
-        $target_file = $target_dir . basename($_FILES["waste_image"]["name"]);
+        
+        // Create a temporary file path
+        $temp_file = $target_dir . "temp_" . basename($_FILES["waste_image"]["name"]);
         $uploadOk = 1;
-        $imageFileType = strtolower(pathinfo($target_file, PATHINFO_EXTENSION));
+        $imageFileType = strtolower(pathinfo($temp_file, PATHINFO_EXTENSION));
 
-        // Check if image file is an actual image or fake image
+        // Check if image file is an actual image
         $check = getimagesize($_FILES["waste_image"]["tmp_name"]);
         if($check === false) {
             $message = "File is not an image.";
             $uploadOk = 0;
         }
 
-        // Check file size
-        if ($_FILES["waste_image"]["size"] > 500000) {
-            $message = "Sorry, your file is too large.";
-            $uploadOk = 0;
-        }
+        if ($uploadOk == 1 && move_uploaded_file($_FILES["waste_image"]["tmp_name"], $temp_file)) {
+            // Convert image to base64
+            $imageData = base64_encode(file_get_contents($temp_file));
+            $API_KEY = 'AIzaSyDRpJORsoLZMRG60l_68TEzH5b3jd6DGZ4';
+            
+            // First API call to validate if it's waste
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" . $API_KEY;
+            $validation_data = [
+                'contents' => [[
+                    'parts' => [
+                        [
+                            'text' => "Is this image showing waste or garbage? Respond with only 'YES' or 'NO'."
+                        ],
+                        [
+                            'inlineData' => [
+                                'mimeType' => $_FILES["waste_image"]["type"],
+                                'data' => $imageData
+                            ]
+                        ]
+                    ]
+                ]],
+                'generationConfig' => [
+                    'temperature' => 0.4,
+                    'topK' => 32,
+                    'topP' => 1,
+                    'maxOutputTokens' => 2048,
+                ]
+            ];
 
-        // Allow certain file formats
-        if($imageFileType != "jpg" && $imageFileType != "png" && $imageFileType != "jpeg"
-        && $imageFileType != "gif" ) {
-            $message = "Sorry, only JPG, JPEG, PNG & GIF files are allowed.";
-            $uploadOk = 0;
-        }
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($validation_data));
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 
-        // If everything is ok, try to upload file
-        if ($uploadOk == 1) {
-            if (move_uploaded_file($_FILES["waste_image"]["tmp_name"], $target_file)) {
-                $message = "The file ". basename( $_FILES["waste_image"]["name"]). " has been uploaded.";
+            $response = curl_exec($ch);
+            curl_close($ch);
+
+            $result = json_decode($response, true);
+            
+            if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
+                $validation_response = strtoupper(trim($result['candidates'][0]['content']['parts'][0]['text']));
                 
-                // Insert data into the database
-                $location = ($_POST['location'] === 'other') ? $_POST['other_location'] : $_POST['location'];
-                $waste_type = $_POST['waste_type'];
-                $sql = "INSERT INTO waste (user_id, image_path, location, waste_type) VALUES (:user_id, :image_path, :location, :waste_type)";
-                $stmt = $pdo->prepare($sql);
-                try {
-                    $stmt->execute([
-                        ':user_id' => $user_id,
-                        ':image_path' => $target_file,
-                        ':location' => $location,
-                        ':waste_type' => $waste_type
-                    ]);
-                    $message .= " Waste information has been recorded.";
+                if ($validation_response === 'YES') {
+                    // Second API call for detailed analysis
+                    $analysis_data = [
+                        'contents' => [[
+                            'parts' => [
+                                [
+                                    'text' => "Please analyze this waste image and provide ONLY these two details:
+1. List all types of waste visible in the image (e.g., plastic, organic, metal)
+2. Estimate the total volume in cubic meters (m³)
+
+Format the response exactly like this example:
+Waste Types: Plastic, Metal
+Estimated Volume: 0.5 m³"
+                                ],
+                                [
+                                    'inlineData' => [
+                                        'mimeType' => $_FILES["waste_image"]["type"],
+                                        'data' => $imageData
+                                    ]
+                                ]
+                            ]
+                        ]],
+                        'generationConfig' => [
+                            'temperature' => 0.4,
+                            'topK' => 32,
+                            'topP' => 1,
+                            'maxOutputTokens' => 2048,
+                        ]
+                    ];
+
+                    $ch = curl_init($url);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_POST, true);
+                    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($analysis_data));
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+
+                    $analysis_response = curl_exec($ch);
+                    curl_close($ch);
+
+                    $analysis_result = json_decode($analysis_response, true);
                     
-                    // Redirect after successful submission
-                    $_SESSION['message'] = $message;
-                    header("Location: " . $_SERVER['PHP_SELF']);
-                    exit;
-                } catch (PDOException $e) {
-                    $message = "Database Error: " . $e->getMessage();
-                    error_log("Database Error in user.php: " . $e->getMessage());
+                    if (isset($analysis_result['candidates'][0]['content']['parts'][0]['text'])) {
+                        $analysis = $analysis_result['candidates'][0]['content']['parts'][0]['text'];
+                        
+                        // Extract waste types
+                        preg_match('/Waste Types: (.*?)(?:\n|$)/i', $analysis, $type_matches);
+                        $waste_types = isset($type_matches[1]) ? trim($type_matches[1]) : 'Unspecified';
+                        
+                        // Extract volume
+                        preg_match('/Estimated Volume: ([\d.]+)\s*m³/i', $analysis, $volume_matches);
+                        $volume = isset($volume_matches[1]) ? trim($volume_matches[1]) : 'Unknown';
+                        
+                        // Move temp file to final destination
+                        $target_file = $target_dir . basename($_FILES["waste_image"]["name"]);
+                        rename($temp_file, $target_file);
+                        
+                        // Insert into database
+                        $location = ($_POST['location'] === 'other') ? $_POST['other_location'] : $_POST['location'];
+                        $sql = "INSERT INTO waste (user_id, image_path, location, waste_type, ai_analysis) 
+                               VALUES (:user_id, :image_path, :location, :waste_type, :ai_analysis)";
+                        $stmt = $pdo->prepare($sql);
+                        
+                        try {
+                            $stmt->execute([
+                                ':user_id' => $user_id,
+                                ':image_path' => $target_file,
+                                ':location' => $location,
+                                ':waste_type' => $waste_types,
+                                ':ai_analysis' => $analysis
+                            ]);
+                            $_SESSION['message'] = "Analysis Complete:\n" . $analysis;
+                            header("Location: " . $_SERVER['PHP_SELF']);
+                            exit;
+                        } catch (PDOException $e) {
+                            $_SESSION['message'] = "Database Error: " . $e->getMessage();
+                            error_log("Database Error in user.php: " . $e->getMessage());
+                            header("Location: " . $_SERVER['PHP_SELF']);
+                            exit;
+                        }
+                    } else {
+                        $message = "Error analyzing the waste types and volume.";
+                    }
+                } else {
+                    unlink($temp_file); // Delete the temporary file
+                    $message = "The uploaded image does not appear to contain waste. Please upload an image of waste or garbage.";
                 }
             } else {
-                $message = "Sorry, there was an error uploading your file.";
+                $message = "Error validating the image. Please try again.";
             }
+        } else {
+            $message = "Sorry, there was an error uploading your file.";
         }
     }
 }
@@ -156,6 +253,59 @@ ob_end_clean(); // Discard any output that has been generated so far
             font-family: 'Poppins', sans-serif;
         }
     </style>
+    <script>
+    // Request notification permission when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        if (Notification.permission !== 'granted') {
+            Notification.requestPermission();
+        }
+    });
+
+    function showNotification(message) {
+        if (Notification.permission === "granted") {
+            const notification = new Notification("WasteWise Reward", {
+                body: message,
+                icon: '/path/to/your/logo.png' // Add your logo path here
+            });
+            
+            // Close notification after 5 seconds
+            setTimeout(() => {
+                notification.close();
+            }, 5000);
+        }
+    }
+
+    function checkForRewards() {
+        fetch('check_rewards.php')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.data.length > 0) {
+                    data.data.forEach(reward => {
+                        showNotification(reward.message);
+                        updateRewardsDisplay();
+                    });
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }
+
+    function updateRewardsDisplay() {
+        fetch('get_rewards.php')
+            .then(response => response.json())
+            .then(data => {
+                const rewardsContainer = document.getElementById('rewards-container');
+                if (rewardsContainer && data.rewards) {
+                    rewardsContainer.innerHTML = data.rewards;
+                }
+            });
+    }
+
+    // Check for rewards every 30 seconds
+    setInterval(checkForRewards, 30000);
+
+    // Initial check
+    checkForRewards();
+    </script>
 </head>
 <body class="bg-gray-100">
     <div class="min-h-screen flex flex-col">
@@ -203,15 +353,6 @@ ob_end_clean(); // Discard any output that has been generated so far
                             <div id="other_location_div" style="display: none;">
                                 <label for="other_location" class="block text-sm font-medium text-gray-700">Other Location</label>
                                 <input id="other_location" name="other_location" type="text" class="mt-1 focus:ring-green-500 focus:border-green-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md" placeholder="Enter your city">
-                            </div>
-                            <div>
-                                <label for="waste_type" class="block text-sm font-medium text-gray-700">Waste Type</label>
-                                <select id="waste_type" name="waste_type" required class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-green-500 focus:border-green-500 sm:text-sm rounded-md">
-                                    <option value="">Select waste type</option>
-                                    <?php foreach ($waste_types as $type): ?>
-                                        <option value="<?php echo htmlspecialchars($type); ?>"><?php echo htmlspecialchars($type); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
                             </div>
                             <div>
                                 <label for="waste_image" class="block text-sm font-medium text-gray-700">Upload Waste Image</label>

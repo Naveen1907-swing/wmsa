@@ -1,6 +1,11 @@
 <?php
+session_start();
 header('Content-Type: application/json');
 header('Cache-Control: no-cache');
+
+if (!isset($_GET['user_id'])) {
+    die(json_encode(['error' => 'Missing user_id parameter']));
+}
 
 $host = 'localhost';
 $dbname = 'test';
@@ -10,27 +15,45 @@ $password = '';
 try {
     $pdo = new PDO("mysql:host=$host;dbname=$dbname", $username, $password);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    die(json_encode(['error' => "Connection failed: " . $e->getMessage()]));
-}
 
-$user_id = isset($_GET['user_id']) ? intval($_GET['user_id']) : 0;
-$last_id = isset($_GET['last_id']) ? intval($_GET['last_id']) : 0;
+    // For admin (user_id = 0), get all unread notifications
+    if ($_GET['user_id'] == '0') {
+        $sql = "SELECT * FROM notifications 
+                WHERE user_id = 0 AND is_read = FALSE 
+                ORDER BY created_at DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+    } 
+    // For labor/user, get notifications since last_id
+    else {
+        $last_id = $_GET['last_id'] ?? 0;
+        $sql = "SELECT * FROM notifications 
+                WHERE user_id = :user_id 
+                AND id > :last_id 
+                AND is_read = FALSE 
+                ORDER BY created_at DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([
+            ':user_id' => $_GET['user_id'],
+            ':last_id' => $last_id
+        ]);
+    }
 
-$stmt = $pdo->prepare("SELECT * FROM notifications WHERE user_id = ? AND id > ? AND is_read = FALSE ORDER BY created_at ASC");
-$stmt->execute([$user_id, $last_id]);
-$notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-if (!empty($notifications)) {
-    $last_id = $notifications[count($notifications) - 1]['id'];
-    
     // Mark notifications as read
-    $stmt = $pdo->prepare("UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND id <= ?");
-    $stmt->execute([$user_id, $last_id]);
-}
+    if (!empty($notifications)) {
+        $update_sql = "UPDATE notifications SET is_read = TRUE 
+                      WHERE id IN (" . implode(',', array_column($notifications, 'id')) . ")";
+        $pdo->exec($update_sql);
+    }
 
-echo json_encode([
-    'notifications' => $notifications,
-    'last_id' => $last_id
-]);
+    echo json_encode([
+        'success' => true,
+        'notifications' => $notifications
+    ]);
+
+} catch(PDOException $e) {
+    echo json_encode(['error' => $e->getMessage()]);
+}
 ?>
